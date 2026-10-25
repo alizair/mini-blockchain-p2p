@@ -3,9 +3,10 @@ import json
 
 from vanity import load_or_create, matches
 from blockchain import Blockchain
+from network import create_app, start_server, broadcast
 
 
-def print_chain(bc: Blockchain):
+def print_chain(bc):
     for b in bc.chain:
         print(
             f'  #{b["index"]}  hash={b["hash"][:16]}...  prev={b["prev_hash"][:16]}...  '
@@ -22,9 +23,9 @@ def main():
 
     with open(args.config) as f:
         config = json.load(f)
-    node_id = config["node_id"]
+    node_id, port, peers = config["node_id"], config["port"], config["peers"]
 
-    # ----- Part 1: identity -----
+    # Part 1: identity
     kp = load_or_create(args.vanity_prefix)
     address = kp["address"]
     print(f"[+] Public Address : {address}")
@@ -34,9 +35,15 @@ def main():
         )
     print("[+] Node Identity initialized successfully.")
 
-    # ----- Part 2: chain -----
+    # Part 2: chain
     bc = Blockchain(args.difficulty)
-    print(f"[+] {node_id} ready. Commands: msg <text> | mine | chain | pending | quit")
+
+    # Part 3: network
+    start_server(create_app(bc, node_id, address, peers), port)
+    print(
+        f"[+] {node_id} listening on http://127.0.0.1:{port}  |  Peers: {', '.join(peers)}"
+    )
+    print("[+] Commands: msg <text> | mine | chain | pending | quit")
 
     while True:
         try:
@@ -44,11 +51,11 @@ def main():
         except (EOFError, KeyboardInterrupt):
             break
         if line.startswith("msg "):
-            bc.add_message(line[4:])
-            print(f"[+] Added pending message ({len(bc.pending)} pending)")
+            print(f"[+] Added pending message ({bc.add_message(line[4:])} pending)")
         elif line == "mine":
             print(f"[+] Triggering Mining Cycle on {node_id}...")
-            bc.mine(address)
+            block = bc.mine(address)
+            broadcast(block, peers)
         elif line == "chain":
             print_chain(bc)
         elif line == "pending":
