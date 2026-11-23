@@ -40,13 +40,6 @@ def create_app(bc, node_id: str, address: str, peers: list) -> Flask:
             return jsonify(accepted=False, reason=f"bad block: {e}"), 400
         return jsonify(accepted=ok, reason=reason), (200 if ok else 409)
 
-    @app.post("/message")
-    def add_message():
-        text = (request.get_json(silent=True) or {}).get("text", "")
-        n = bc.add_message(text)
-        print(f"\n[+] Added pending message via HTTP ({n} pending)")
-        return jsonify(pending=bc.pending)
-
     @app.post("/mine")
     def mine():
         print(f"\n[+] Triggering Mining Cycle on {node_id} (via HTTP)...")

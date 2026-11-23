@@ -1,6 +1,8 @@
-# Mini Blockchain P2P - ECE 496C / 519C Assignment 1
+# Mini Blockchain P2P - ECE 496C / 519C Assignment 2 (UTXO Currency)
 
-A lightweight Layer 1 blockchain with:
+Assignment 2 turns the Assignment 1 text-message ledger into a UTXO currency: block payloads now hold signed **transactions** instead of text messages (see [Assignment 2 - Part 1](#assignment-2---part-1-utxo-transactions-signatures--output-locking)).
+
+Assignment 1 base:
 
 1. **Part 1** - Legacy Bitcoin (P2PKH) vanity address generator
 2. **Part 2** - Hardcoded genesis block, deterministic block hashing and on-demand Proof-of-Work mining
@@ -18,10 +20,14 @@ mini-blockchain-p2p/
 ├── vanity.py          # Part 1: keypair generation, P2PKH address, vanity search
 ├── blockchain.py      # Part 2: genesis block, hashing, mining, validation
 ├── network.py         # Part 3: Flask server, endpoints, broadcasting
+├── transaction.py     # A2 Part 1: tx structure, txid, ECDSA signing, locking, fees, change
+├── test_part1.py      # A2 Part 1 self-test (python test_part1.py)
 ├── node1.json         # Node 1 config (port 8001)
 ├── node2.json         # Node 2 config (port 8002)
 ├── node3.json         # Node 3 config (port 8003)
-├── keypair.json       # Pre-computed vanity keypair (assignment use only, never for real funds)
+├── keypair.json       # Assignment 1 vanity keypair, used by Node1 (assignment use only)
+├── keypair2.json      # Node2 keypair (no vanity prefix)
+├── keypair3.json      # Node3 keypair (no vanity prefix)
 ├── requirements.txt
 ├── README.md
 └── AI_Usage_Log.md
@@ -46,15 +52,17 @@ Dependencies: `ecdsa`, `pycryptodome` (RIPEMD-160), `base58`, `flask`, `requests
 Open **three terminals**, activate the virtual environment in each, then run one command per terminal:
 
 ```bash
-# Terminal 1
-python main.py --config node1.json --vanity-prefix ALI --difficulty 4
+# Terminal 1 (Node1, Assignment 1 vanity keypair)
+python main.py --config node1.json --vanity-prefix TES --difficulty 4
 
 # Terminal 2
-python main.py --config node2.json --vanity-prefix ALI --difficulty 4
+python main.py --config node2.json --difficulty 4
 
 # Terminal 3
-python main.py --config node3.json --vanity-prefix ALI --difficulty 4
+python main.py --config node3.json --difficulty 4
 ```
+
+Each node loads the keypair file named in its config. An existing keypair file is never overwritten (coins are locked to its address); `--vanity-prefix` only triggers a vanity search when `keypair.json` does not exist yet.
 
 Start all three nodes before mining. The chain is kept in memory only.
 
@@ -63,7 +71,7 @@ Start all three nodes before mining. The chain is kept in memory only.
 | Argument          | Description                                                        |
 | ----------------- | ------------------------------------------------------------------ |
 | `--config`        | Path to the node's JSON config file                                |
-| `--vanity-prefix` | Required characters 2–4 of the address (case-insensitive)          |
+| `--vanity-prefix` | Node1 only: characters 2–4 of the address (case-insensitive)       |
 | `--difficulty`    | Number of leading hex zeros required in a block hash (default `4`) |
 
 ### Config Format (`node1.json`)
@@ -72,11 +80,12 @@ Start all three nodes before mining. The chain is kept in memory only.
 {
   "node_id": "Node1",
   "port": 8001,
-  "peers": ["http://127.0.0.1:8002", "http://127.0.0.1:8003"]
+  "peers": ["http://127.0.0.1:8002", "http://127.0.0.1:8003"],
+  "keypair": "keypair.json"
 }
 ```
 
-Each node lists the other two nodes as peers.
+Each node lists the other two nodes as peers. `keypair` is `keypair.json` (Node1), `keypair2.json` (Node2) or `keypair3.json` (Node3).
 
 ---
 
@@ -84,22 +93,21 @@ Each node lists the other two nodes as peers.
 
 ### Terminal
 
-| Command      | Action                                                                              |
-| ------------ | ----------------------------------------------------------------------------------- |
-| `msg <text>` | Add a pending message (local to this node)                                          |
-| `mine`       | Mine one block with pending messages, add it to the local chain, broadcast it, stop |
-| `chain`      | Print this node's chain                                                             |
-| `pending`    | Show pending messages                                                               |
-| `quit`       | Stop the node                                                                       |
+| Command   | Action                                                                            |
+| --------- | --------------------------------------------------------------------------------- |
+| `mine`    | Mine one block with pending transactions, add it to the local chain, broadcast it |
+| `chain`   | Print this node's chain with each block's transactions                            |
+| `pending` | Show pending (unconfirmed) transactions                                           |
+| `address` | Print this node's address and public key                                          |
+| `quit`    | Stop the node                                                                     |
 
 ### HTTP Endpoints
 
-| Method & Path   | Purpose                                                    |
-| --------------- | ---------------------------------------------------------- |
-| `POST /block`   | Receive a block from a peer (runs the 4 validation checks) |
-| `POST /message` | Add a pending message, body: `{"text": "..."}`             |
-| `POST /mine`    | Trigger mining on this node                                |
-| `GET /chain`    | Return this node's chain as JSON                           |
+| Method & Path | Purpose                                                    |
+| ------------- | ---------------------------------------------------------- |
+| `POST /block` | Receive a block from a peer (runs the 4 validation checks) |
+| `POST /mine`  | Trigger mining on this node                                |
+| `GET /chain`  | Return this node's chain as JSON                           |
 
 ---
 
@@ -119,7 +127,7 @@ To regenerate the keypair:
 
 ```bash
 rm keypair.json
-python vanity.py ALI
+python vanity.py TES
 ```
 
 Sanity check against a known test vector (private key = 1):
@@ -134,58 +142,58 @@ python vanity.py test     # prints 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
 
 ### Block Fields
 
-| Field           | Type         | Description                               |
-| --------------- | ------------ | ----------------------------------------- |
-| `index`         | int          | Block height                              |
-| `prev_hash`     | str (64 hex) | Hash of the previous block                |
-| `timestamp`     | str          | UTC ISO-8601, e.g. `2026-10-24T12:00:00Z` |
-| `data`          | list[str]    | Messages included in the block            |
-| `nonce`         | int          | Proof-of-Work counter                     |
-| `miner_address` | str          | Miner's vanity address                    |
-| `hash`          | str (64 hex) | SHA-256 of the fields above               |
+| Field           | Type         | Description                                     |
+| --------------- | ------------ | ----------------------------------------------- |
+| `index`         | int          | Block height                                    |
+| `prev_hash`     | str (64 hex) | Hash of the previous block                      |
+| `timestamp`     | str          | UTC ISO-8601, e.g. `2026-10-24T12:00:00Z`       |
+| `transactions`  | list[tx]     | Transactions in the block (A2, replaces `data`) |
+| `nonce`         | int          | Proof-of-Work counter                           |
+| `miner_address` | str          | Miner's vanity address                          |
+| `hash`          | str (64 hex) | SHA-256 of the fields above                     |
 
 ### Hashing Format (exact)
 
 The `hash` field is **not** part of the hash input. Fields are joined with `|` in this order:
 
 ```
-index|timestamp|prev_hash|data|nonce|miner_address
+index|timestamp|prev_hash|txids|nonce|miner_address
 ```
 
-- `data` is serialized with `json.dumps(data, separators=(",", ":"))` → e.g. `["hello","world"]`, empty list → `[]`
+- `txids` is the list of the block's txids **in block order**, serialized with `json.dumps([tx["txid"] for tx in transactions], separators=(",", ":"))` → e.g. `["cafa...abcc","5f54...9214"]`, no transactions → `[]`. Each txid commits to its transaction's inputs and outputs, so the block hash covers them.
 - `index` and `nonce` are written as plain decimal integers
 - The resulting string is UTF-8 encoded and hashed with **SHA-256**, output as lowercase hex
 
 Python:
 
 ```python
-data_str = json.dumps(block["data"], separators=(",", ":"))
-s = f'{index}|{timestamp}|{prev_hash}|{data_str}|{nonce}|{miner_address}'
+txids = json.dumps([tx["txid"] for tx in block["transactions"]], separators=(",", ":"))
+s = f'{index}|{timestamp}|{prev_hash}|{txids}|{nonce}|{miner_address}'
 hash = hashlib.sha256(s.encode()).hexdigest()
 ```
 
 Example input string for genesis:
 
 ```
-0|2026-01-01T00:00:00Z|0000000000000000000000000000000000000000000000000000000000000000|["Genesis Block"]|0|GENESIS
+0|2026-01-01T00:00:00Z|0000000000000000000000000000000000000000000000000000000000000000|[]|0|GENESIS
 ```
 
 ### Genesis Block (hardcoded, identical on all nodes)
 
-| Field         | Value                  |
-| ------------- | ---------------------- |
-| index         | `0`                    |
-| prev_hash     | `"0" * 64`             |
-| timestamp     | `2026-01-01T00:00:00Z` |
-| nonce         | `0`                    |
-| miner_address | `GENESIS`              |
-| data          | `["Genesis Block"]`    |
+| Field         | Value                    |
+| ------------- | ------------------------ |
+| index         | `0`                      |
+| prev_hash     | `"0" * 64`               |
+| timestamp     | `2026-01-01T00:00:00Z`   |
+| nonce         | `0`                      |
+| miner_address | `GENESIS`                |
+| transactions  | `[]` (no coins at start) |
 
 The genesis hash is computed with the same formula but is trusted and **not** checked for Proof-of-Work.
 
 ### Mining
 
-On `mine`, the node takes all pending messages (or `[]` if none), builds a block on top of its tip with its vanity address as `miner_address`, and increments `nonce` from 0 until the hash starts with `difficulty` zeros. The block is appended to the local chain **first**, then broadcast to peers. Mining runs once per command (no background mining).
+On `mine`, the node takes all pending transactions (or `[]` if none), builds a block on top of its tip with its vanity address as `miner_address`, and increments `nonce` from 0 until the hash starts with `difficulty` zeros. The block is appended to the local chain **first**, then broadcast to peers. Mining runs once per command (no background mining).
 
 ---
 
@@ -201,6 +209,7 @@ Each node runs a Flask HTTP server in a background thread. After mining, the blo
 2. **Difficulty verification:** the recomputed hash starts with `difficulty` zeros.
 3. **Chain continuity:** `block["prev_hash"] == tip["hash"]`.
 4. **Index sequence:** `block["index"] == tip["index"] + 1`.
+5. **Transaction structure (A2):** every transaction is well-formed (types, positive integer amounts, valid addresses) and its `txid` matches its contents.
 
 The block is appended only if all four checks pass. Each check is printed with ✓ in the node's terminal.
 
@@ -216,6 +225,90 @@ If two nodes mine at the same height simultaneously, each keeps its own block an
 
 ---
 
+## Assignment 2 - Part 1: UTXO Transactions, Signatures & Output Locking
+
+Code: `transaction.py`. There are no account balances: value lives in **unspent transaction outputs (UTXOs)**. A balance is the sum of the UTXOs locked to an address.
+
+### Transaction Structure
+
+```json
+{
+  "txid": "5f54115a...f29214",
+  "inputs": [
+    {
+      "prev_txid": "cafa8691...99abcc",
+      "output_index": 0,
+      "scriptSig": {
+        "signature": "<DER hex>",
+        "public_key": "<33-byte compressed pubkey hex>"
+      }
+    }
+  ],
+  "outputs": [
+    { "amount": 20, "scriptPubKey": { "recipient_address": "1Fhsqa...qrZ5N" } },
+    { "amount": 29, "scriptPubKey": { "recipient_address": "1TeSor...QZQt" } }
+  ]
+}
+```
+
+| Field                                      | Meaning                                                                 |
+| ------------------------------------------ | ----------------------------------------------------------------------- |
+| `inputs[].prev_txid` + `output_index`      | **Outpoint**: which earlier output is being spent (`txid:index`)        |
+| `inputs[].scriptSig`                       | Unlocking key: spender's ECDSA signature + full (compressed) public key |
+| `outputs[].amount`                         | Positive integer, atomic units (no fractions, no zero/negative)         |
+| `outputs[].scriptPubKey.recipient_address` | Lock: `Base58Check(0x00 ‖ RIPEMD160(SHA256(PublicKey)))`                |
+
+### txid Serialization (exact)
+
+`txid = SHA-256(preimage)` as lowercase hex, where the preimage is compact JSON (`separators=(",", ":")`, UTF-8) with keys in exactly this order. **`scriptSig` is excluded**, so signing does not change the txid.
+
+```
+{"inputs":[{"prev_txid":<hex>,"output_index":<int>}, ...],"outputs":[{"amount":<int>,"recipient_address":<str>}, ...]}
+```
+
+Real example (Node1 pays Node2 20, fee 1, change 29):
+
+```
+{"inputs":[{"prev_txid":"cafa8691cd4cfd195091db2b97777a52c99cfcc8a5258c10f5e7ee355199abcc","output_index":0}],"outputs":[{"amount":20,"recipient_address":"1FhsqaSQfW2zUi9MshycFudAzxdnKqrZ5N"},{"amount":29,"recipient_address":"1TeSorB2mL78iRBPVM45STEXVkKbqQZQt"}]}
+```
+
+A coinbase input also carries `"height":<int>` right after `output_index` (`{"prev_txid":"000…000","output_index":0,"height":1}`), so coinbases in different blocks never share a txid.
+
+### Signing & Lock Verification
+
+- **Sign:** the spender signs the 32-byte txid directly as the digest with ECDSA **secp256k1** (`sign_digest_deterministic`, RFC 6979 nonces, DER encoding). The txid is already a SHA-256 hash, so it is not hashed again.
+- **scriptSig:** `{"signature": <DER hex>, "public_key": <compressed pubkey hex>}`.
+- **Unlock check (`unlocks()`):**
+  1. Decode the output's `recipient_address` with Base58Check (verify the 4-byte checksum and version `0x00`) to get the 20-byte hash.
+  2. Require `RIPEMD160(SHA256(public_key)) ==` that hash: the key must belong to the address.
+  3. Require the signature to verify over the txid with that public key.
+
+### Fees & Change
+
+- There is **no fee field**. `fee = sum(input amounts) − sum(output amounts)` (`compute_fee()`), and it must be `≥ 0`. Anything not assigned to an output goes to the miner.
+- UTXOs are spent **whole**, like banknotes. `create_transaction(keypair, utxo_set, recipient, amount, fee)` picks the sender's UTXOs (largest first) until it covers `amount + fee`, then creates:
+  - output 0: `amount` → recipient
+  - output 1: `total − amount − fee` → sender (**change**), left out if it is 0
+- It computes the txid and then fills every input's `scriptSig`.
+
+UTXO set format used by these helpers: `{"<txid>:<index>": {"amount": int, "address": str}}`.
+
+### Self-Test
+
+```bash
+python test_part1.py
+```
+
+This test builds a 50-unit output locked to Node1 and spends 20 to Node2 with fee 1 (29 change). It checks:
+
+- the txid ignores `scriptSig`
+- tampering breaks the txid or the signature
+- Node3's key cannot unlock Node1's output
+- non-positive or fractional amounts are rejected
+- the block hash depends on txid order
+
+---
+
 ## Demo Walkthrough
 
 **1. Launch:** start the three nodes as shown above.
@@ -223,7 +316,6 @@ If two nodes mine at the same height simultaneously, each keeps its own block an
 **2. On-demand mining:** on Node 1:
 
 ```
-Node1> msg hello from node 1
 Node1> mine
 ```
 

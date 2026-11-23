@@ -3,22 +3,31 @@ import json
 import threading
 from datetime import datetime, timezone
 
+from transaction import validate_structure
+
 GENESIS = {
     "index": 0,
     "prev_hash": "0" * 64,
     "timestamp": "2026-01-01T00:00:00Z",
-    "data": ["Genesis Block"],
+    "transactions": [],  # chain starts with no coins
     "nonce": 0,
     "miner_address": "GENESIS",
 }
 
 
 def hash_input(block: dict) -> str:
-    """Order: index|timestamp|prev_hash|data|nonce|miner_address  ('hash' NOT included)."""
-    data_str = json.dumps(block["data"], separators=(",", ":"))
+    """Order: index|timestamp|prev_hash|txids|nonce|miner_address  ('hash' NOT included).
+
+    txids = compact JSON list of the block's txids in block order, e.g.
+    ["9f2c...","4be1..."]; empty block -> []. Each txid commits to its
+    transaction's inputs and outputs, so the block hash covers them too.
+    """
+    txids = json.dumps(
+        [tx["txid"] for tx in block["transactions"]], separators=(",", ":")
+    )
     return (
         f'{block["index"]}|{block["timestamp"]}|{block["prev_hash"]}|'
-        f'{data_str}|{block["nonce"]}|{block["miner_address"]}'
+        f'{txids}|{block["nonce"]}|{block["miner_address"]}'
     )
 
 
@@ -35,30 +44,33 @@ def make_genesis() -> dict:
 class Blockchain:
     def __init__(self, difficulty: int):
         self.chain = [make_genesis()]
-        self.pending = []
+        self.pending = (
+            []
+        )  # unconfirmed transactions (full mempool rules come in Part 2)
         self.difficulty = difficulty
         self.lock = threading.Lock()  # one thread at a time may change the chain
 
     def tip(self) -> dict:
         return self.chain[-1]
 
-    def add_message(self, text: str) -> int:
-        self.pending.append(text)
-        return len(self.pending)
+    def add_transaction(self, tx: dict):
+        """Part 1: structural check only (shape, amounts, txid).
+        Part 2 adds the 4 checks against the UTXO set."""
+        ok, reason = validate_structure(tx)
+        if ok:
+            self.pending.append(tx)
+        return ok, reason
 
     # ---------- Mining ----------
     def mine(self, miner_address: str) -> dict:
         with self.lock:  # held for the whole mining run -> incoming blocks wait
             tip = self.tip()
-            data, self.pending = (
-                self.pending,
-                [],
-            )  # take messages; new ones go to a fresh list
+            txs, self.pending = self.pending, []  # take pending txs
             block = {
                 "index": tip["index"] + 1,
                 "prev_hash": tip["hash"],
                 "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "data": data,
+                "transactions": txs,
                 "nonce": 0,
                 "miner_address": miner_address,
             }
@@ -102,13 +114,15 @@ class Blockchain:
             "index",
             "prev_hash",
             "timestamp",
-            "data",
+            "transactions",
             "nonce",
             "miner_address",
             "hash",
         )
         if not all(k in block for k in required):
             return False, "missing fields"
+        if not isinstance(block["transactions"], list):
+            return False, "transactions must be a list"
         tip = self.tip()
 
         # 1. Hash verification
@@ -132,5 +146,12 @@ class Blockchain:
         if block["index"] != tip["index"] + 1:
             return False, f'index {block["index"]} != tip+1 ({tip["index"] + 1})'
         print("    [✓] 4. Index sequence")
+
+        # 5. Every transaction is well-formed and its txid matches its contents
+        for n, tx in enumerate(block["transactions"]):
+            ok, reason = validate_structure(tx)
+            if not ok:
+                return False, f"transaction {n}: {reason}"
+        print(f'    [✓] 5. Transaction structure ({len(block["transactions"])} txs)')
 
         return True, "ok"

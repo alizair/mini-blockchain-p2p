@@ -85,6 +85,26 @@ def load_or_create(prefix: str, path="keypair.json") -> dict:
     return kp
 
 
+def load_or_create_plain(path: str) -> dict:
+    """Keypair with no vanity prefix (Node2 / Node3). Created once, then reused."""
+    if os.path.exists(path):
+        with open(path) as f:
+            kp = json.load(f)
+        print(f"[+] Loading keypair from {path}...")
+    else:
+        priv_hex, pub = generate_keypair()
+        kp = {
+            "private_key": priv_hex,
+            "public_key": pub.hex(),
+            "address": pubkey_to_address(pub),
+        }
+        save_keypair(kp, path)
+        print(f"[+] Generated new keypair -> {path}")
+    if pubkey_to_address(bytes.fromhex(kp["public_key"])) != kp["address"]:
+        raise SystemExit(f"[x] {path}: public_key does not match address")
+    return kp
+
+
 if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] != "test":
     kp = load_or_create(sys.argv[1])
     print(f"[+] Public Address : {kp['address']}")
