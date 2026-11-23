@@ -53,7 +53,7 @@ Open **three terminals**, activate the virtual environment in each, then run one
 
 ```bash
 # Terminal 1 (Node1, Assignment 1 vanity keypair)
-python main.py --config node1.json --vanity-prefix TES --difficulty 4
+python main.py --config node1.json --vanity-prefix ALI --difficulty 4
 
 # Terminal 2
 python main.py --config node2.json --difficulty 4
@@ -93,21 +93,28 @@ Each node lists the other two nodes as peers. `keypair` is `keypair.json` (Node1
 
 ### Terminal
 
-| Command   | Action                                                                            |
-| --------- | --------------------------------------------------------------------------------- |
-| `mine`    | Mine one block with pending transactions, add it to the local chain, broadcast it |
-| `chain`   | Print this node's chain with each block's transactions                            |
-| `pending` | Show pending (unconfirmed) transactions                                           |
-| `address` | Print this node's address and public key                                          |
-| `quit`    | Stop the node                                                                     |
+| Command      | Action                                                                              |
+| ------------ | ----------------------------------------------------------------------------------- |
+| `send <address> <amount> [--fee N]` | Create + sign a tx (with change), add to mempool, broadcast to peers |
+| `mine`       | Mine a block: coinbase (50 + fees) + valid mempool txs, then broadcast |
+| `balance`    | This node's balance and the UTXOs that make it up                    |
+| `utxos`      | The node's whole confirmed UTXO set                                  |
+| `mempool`    | Unconfirmed transactions waiting to be mined                         |
+| `chain`      | Print the chain with each block's transactions                       |
+| `address`    | Print this node's address and public key                             |
+| `doublespend <address> <amount>` | Demo: re-spend a UTXO already spent in the mempool (rejected) |
+| `badsig <address> <amount>` | Demo: tx with a signature over the wrong data (rejected)      |
+| `quit`       | Stop the node                                                                       |
 
 ### HTTP Endpoints
 
-| Method & Path | Purpose                                                    |
-| ------------- | ---------------------------------------------------------- |
-| `POST /block` | Receive a block from a peer (runs the 4 validation checks) |
-| `POST /mine`  | Trigger mining on this node                                |
-| `GET /chain`  | Return this node's chain as JSON                           |
+| Method & Path   | Purpose                                                    |
+| --------------- | ---------------------------------------------------------- |
+| `POST /block`   | Receive a block from a peer (runs the block validation checks) |
+| `POST /tx`      | Receive a transaction from a peer (runs Checks 1-4, adds to mempool) |
+| `GET /mempool`  | Return this node's mempool as JSON                         |
+| `POST /mine`    | Trigger mining on this node                                |
+| `GET /chain`    | Return this node's chain as JSON                           |
 
 ---
 
@@ -127,7 +134,7 @@ To regenerate the keypair:
 
 ```bash
 rm keypair.json
-python vanity.py TES
+python vanity.py ALI
 ```
 
 Sanity check against a known test vector (private key = 1):
@@ -142,15 +149,15 @@ python vanity.py test     # prints 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
 
 ### Block Fields
 
-| Field           | Type         | Description                                     |
-| --------------- | ------------ | ----------------------------------------------- |
-| `index`         | int          | Block height                                    |
-| `prev_hash`     | str (64 hex) | Hash of the previous block                      |
-| `timestamp`     | str          | UTC ISO-8601, e.g. `2026-10-24T12:00:00Z`       |
+| Field           | Type         | Description                               |
+| --------------- | ------------ | ----------------------------------------- |
+| `index`         | int          | Block height                              |
+| `prev_hash`     | str (64 hex) | Hash of the previous block                |
+| `timestamp`     | str          | UTC ISO-8601, e.g. `2026-10-24T12:00:00Z` |
 | `transactions`  | list[tx]     | Transactions in the block (A2, replaces `data`) |
-| `nonce`         | int          | Proof-of-Work counter                           |
-| `miner_address` | str          | Miner's vanity address                          |
-| `hash`          | str (64 hex) | SHA-256 of the fields above                     |
+| `nonce`         | int          | Proof-of-Work counter                     |
+| `miner_address` | str          | Miner's vanity address                    |
+| `hash`          | str (64 hex) | SHA-256 of the fields above               |
 
 ### Hashing Format (exact)
 
@@ -180,13 +187,13 @@ Example input string for genesis:
 
 ### Genesis Block (hardcoded, identical on all nodes)
 
-| Field         | Value                    |
-| ------------- | ------------------------ |
-| index         | `0`                      |
-| prev_hash     | `"0" * 64`               |
-| timestamp     | `2026-01-01T00:00:00Z`   |
-| nonce         | `0`                      |
-| miner_address | `GENESIS`                |
+| Field         | Value                  |
+| ------------- | ---------------------- |
+| index         | `0`                    |
+| prev_hash     | `"0" * 64`             |
+| timestamp     | `2026-01-01T00:00:00Z` |
+| nonce         | `0`                    |
+| miner_address | `GENESIS`              |
 | transactions  | `[]` (no coins at start) |
 
 The genesis hash is computed with the same formula but is trusted and **not** checked for Proof-of-Work.
@@ -209,7 +216,11 @@ Each node runs a Flask HTTP server in a background thread. After mining, the blo
 2. **Difficulty verification:** the recomputed hash starts with `difficulty` zeros.
 3. **Chain continuity:** `block["prev_hash"] == tip["hash"]`.
 4. **Index sequence:** `block["index"] == tip["index"] + 1`.
-5. **Transaction structure (A2):** every transaction is well-formed (types, positive integer amounts, valid addresses) and its `txid` matches its contents.
+5. **Coinbase (A2):** the first transaction is a coinbase (zeroed outpoint, `height` = block index) and it is the only one.
+6. **Transactions (A2):** every other transaction passes Checks 1-4 below, with no outpoint spent twice within the block.
+7. **Reward (A2):** coinbase output total ≤ 50 + total fees of the block's other transactions.
+
+After a block is accepted (mined locally or received), the node updates its UTXO set (removes spent outputs, adds new outputs) and removes the block's transactions, and any mempool tx whose inputs are now gone, from its mempool.
 
 The block is appended only if all four checks pass. Each check is printed with ✓ in the node's terminal.
 
@@ -238,25 +249,22 @@ Code: `transaction.py`. There are no account balances: value lives in **unspent 
     {
       "prev_txid": "cafa8691...99abcc",
       "output_index": 0,
-      "scriptSig": {
-        "signature": "<DER hex>",
-        "public_key": "<33-byte compressed pubkey hex>"
-      }
+      "scriptSig": { "signature": "<DER hex>", "public_key": "<33-byte compressed pubkey hex>" }
     }
   ],
   "outputs": [
     { "amount": 20, "scriptPubKey": { "recipient_address": "1Fhsqa...qrZ5N" } },
-    { "amount": 29, "scriptPubKey": { "recipient_address": "1TeSor...QZQt" } }
+    { "amount": 29, "scriptPubKey": { "recipient_address": "1ALiVn...Xe1tP" } }
   ]
 }
 ```
 
-| Field                                      | Meaning                                                                 |
-| ------------------------------------------ | ----------------------------------------------------------------------- |
-| `inputs[].prev_txid` + `output_index`      | **Outpoint**: which earlier output is being spent (`txid:index`)        |
-| `inputs[].scriptSig`                       | Unlocking key: spender's ECDSA signature + full (compressed) public key |
-| `outputs[].amount`                         | Positive integer, atomic units (no fractions, no zero/negative)         |
-| `outputs[].scriptPubKey.recipient_address` | Lock: `Base58Check(0x00 ‖ RIPEMD160(SHA256(PublicKey)))`                |
+| Field                                  | Meaning                                                                 |
+| -------------------------------------- | ----------------------------------------------------------------------- |
+| `inputs[].prev_txid` + `output_index`  | **Outpoint**: which earlier output is being spent (`txid:index`)       |
+| `inputs[].scriptSig`                   | Unlocking key: spender's ECDSA signature + full (compressed) public key |
+| `outputs[].amount`                     | Positive integer, atomic units (no fractions, no zero/negative)         |
+| `outputs[].scriptPubKey.recipient_address` | Lock: `Base58Check(0x00 ‖ RIPEMD160(SHA256(PublicKey)))`            |
 
 ### txid Serialization (exact)
 
@@ -269,7 +277,7 @@ Code: `transaction.py`. There are no account balances: value lives in **unspent 
 Real example (Node1 pays Node2 20, fee 1, change 29):
 
 ```
-{"inputs":[{"prev_txid":"cafa8691cd4cfd195091db2b97777a52c99cfcc8a5258c10f5e7ee355199abcc","output_index":0}],"outputs":[{"amount":20,"recipient_address":"1FhsqaSQfW2zUi9MshycFudAzxdnKqrZ5N"},{"amount":29,"recipient_address":"1TeSorB2mL78iRBPVM45STEXVkKbqQZQt"}]}
+{"inputs":[{"prev_txid":"cafa8691cd4cfd195091db2b97777a52c99cfcc8a5258c10f5e7ee355199abcc","output_index":0}],"outputs":[{"amount":20,"recipient_address":"1FhsqaSQfW2zUi9MshycFudAzxdnKqrZ5N"},{"amount":29,"recipient_address":"1ALiVng8exiZxpwRJujRX9aMbocNAXe1tP"}]}
 ```
 
 A coinbase input also carries `"height":<int>` right after `output_index` (`{"prev_txid":"000…000","output_index":0,"height":1}`), so coinbases in different blocks never share a txid.
@@ -306,6 +314,54 @@ This test builds a 50-unit output locked to Node1 and spends 20 to Node2 with fe
 - Node3's key cannot unlock Node1's output
 - non-positive or fractional amounts are rejected
 - the block hash depends on txid order
+
+---
+
+## Assignment 2 - Part 2: Mempool, Validation & Coinbase Rewards
+
+Code: `blockchain.py` (`check_transaction`, `add_transaction`, `apply_block`, `mine`, `_validate`).
+
+- **UTXO set:** `bc.utxos = {"txid:index": {"amount", "address"}}`, built only from confirmed blocks.
+- **Mempool:** `bc.mempool`, a list of unconfirmed transactions.
+
+### The 4 Transaction Checks (`check_transaction`)
+
+Every transaction runs these before it enters the mempool or a block:
+
+1. **Existence:** every input outpoint is in the confirmed UTXO set. Outputs of mempool transactions cannot be spent.
+2. **Unspent / double spend:** the outpoint is not already spent by a mempool transaction (or by an earlier tx in the same block), and it doesn't appear twice in the same tx.
+3. **Authorization:** `pubkey_to_address(public_key)` equals the output's address, and the ECDSA signature is valid over the txid.
+4. **Conservation:** `sum(inputs) >= sum(outputs)`. The difference is the fee.
+
+Coinbase transactions skip these checks; the block checks 5-7 cover them instead.
+
+### Coinbase
+
+The first transaction in every mined block has:
+- one input: `prev_txid = "000…000"`, `output_index = 0`, `height = <block index>` (the height is in the txid, so coinbase txids are unique)
+- one output: `50 + fees` locked to the miner's address
+
+### Broadcasting
+
+- **Transactions:** `send` posts the new tx to every peer's `/tx`. Peers run Checks 1-4 and add it to their mempool, or log the reason and reject it.
+- **Blocks:** after `mine`, the block is posted to every peer's `/block`. Invalid data is rejected with a logged reason and never crashes the node.
+
+## Happy Path Demo
+
+```
+Node1> mine                                   # Block #1, coinbase 50 -> Node1
+Node1> balance                                # 50
+Node1> send <Node2 address> 20 --fee 1        # change 29 back to Node1
+Node2> mempool                                # the tx shows up on Node2 / Node3
+Node1> doublespend <Node2 address> 30         # rejected: Check 2 (locally and by peers)
+Node1> mine                                   # Block #2, coinbase 51 (50 + 1 fee)
+Node1> utxos                                  # 51 (coinbase), 20 (Node2), 29 (change)
+Node1> balance                                # 80
+Node2> balance                                # 20
+Node1> badsig <Node2 address> 5               # rejected: Check 3 invalid signature
+```
+
+Run `badsig` when Node1 has a UTXO that isn't already pending in the mempool (for example right after a `mine`).
 
 ---
 

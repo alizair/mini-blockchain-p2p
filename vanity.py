@@ -93,11 +93,7 @@ def load_or_create_plain(path: str) -> dict:
         print(f"[+] Loading keypair from {path}...")
     else:
         priv_hex, pub = generate_keypair()
-        kp = {
-            "private_key": priv_hex,
-            "public_key": pub.hex(),
-            "address": pubkey_to_address(pub),
-        }
+        kp = {"private_key": priv_hex, "public_key": pub.hex(), "address": pubkey_to_address(pub)}
         save_keypair(kp, path)
         print(f"[+] Generated new keypair -> {path}")
     if pubkey_to_address(bytes.fromhex(kp["public_key"])) != kp["address"]:

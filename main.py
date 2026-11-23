@@ -4,7 +4,8 @@ import os
 
 from vanity import load_or_create, load_or_create_plain, matches
 from blockchain import Blockchain
-from network import create_app, start_server, broadcast
+from network import create_app, start_server, broadcast, broadcast_tx
+from transaction import create_transaction, sign_txid
 
 
 def short(h: str) -> str:
@@ -13,11 +14,8 @@ def short(h: str) -> str:
 
 def print_tx(tx, indent="      "):
     ins = ", ".join(
-        (
-            "coinbase(height=%s)" % i.get("height")
-            if i["prev_txid"] == "0" * 64
-            else f'{short(i["prev_txid"])}:{i["output_index"]}'
-        )
+        "coinbase(height=%s)" % i.get("height") if i["prev_txid"] == "0" * 64
+        else f'{short(i["prev_txid"])}:{i["output_index"]}'
         for i in tx["inputs"]
     )
     outs = ", ".join(
@@ -53,11 +51,57 @@ def load_identity(config: dict, prefix):
                 f'"{prefix.upper()}" case-insensitive)'
             )
         else:
-            print(
-                f'[!] Prefix Status : "{kp["address"][1:4]}" does not match "{prefix.upper()}" '
-                f"(keeping existing {path})"
-            )
+            print(f'[!] Prefix Status : "{kp["address"][1:4]}" does not match "{prefix.upper()}" '
+                  f"(keeping existing {path})")
     return kp
+
+
+def send(bc, kp, peers, line):
+    # send <address> <amount> [--fee N]
+    parts = line.split()
+    try:
+        recipient, amount = parts[1], int(parts[2])
+        fee = int(parts[parts.index("--fee") + 1]) if "--fee" in parts else 0
+        # don't reuse UTXOs that our own mempool txs already spend
+        tx = create_transaction(kp, bc.utxos, recipient, amount, fee, exclude=bc.mempool_spent())
+    except (IndexError, ValueError) as e:
+        print(f"[x] {e}  (usage: send <address> <amount> [--fee N])")
+        return
+    ok, reason = bc.add_transaction(tx)
+    if not ok:
+        print(f"[x] TX rejected: {reason}")
+        return
+    print(f"[+] TX {tx['txid'][:4]}...{tx['txid'][-2:]} accepted to mempool, broadcast to {len(peers)} peers")
+    print_tx(tx, indent="  ")
+    broadcast_tx(tx, peers)
+
+
+def bad_tx(bc, kp, peers, line, kind):
+    """Demo only: build an invalid tx and show that we and our peers reject it."""
+    parts = line.split()
+    try:
+        recipient, amount = parts[1], int(parts[2])
+        if kind == "doublespend":
+            # re-spend a UTXO that a mempool tx is already spending
+            spent = bc.mempool_spent()
+            if not spent:
+                print("[x] Nothing in the mempool to double spend. Run send first.")
+                return
+            utxos = {k: v for k, v in bc.utxos.items() if k in spent}
+            tx = create_transaction(kp, utxos, recipient, amount, 0)
+        else:
+            tx = create_transaction(kp, bc.utxos, recipient, amount, 0, exclude=bc.mempool_spent())
+            # replace the signature with one over a different message
+            for inp in tx["inputs"]:
+                inp["scriptSig"]["signature"] = sign_txid("00" * 32, kp["private_key"])
+    except (IndexError, ValueError) as e:
+        print(f"[x] {e}")
+        return
+    ok, reason = bc.add_transaction(tx)
+    print(f"[x] Local node rejected {kind} TX {tx['txid'][:8]}...: {reason}" if not ok
+          else f"[!] {kind} TX was accepted?!")
+    print(f"[+] Sending it to peers anyway to show they reject it too...")
+    broadcast_tx(tx, peers)
 
 
 def main():
@@ -83,7 +127,8 @@ def main():
     print(
         f"[+] {node_id} listening on http://127.0.0.1:{port}  |  Peers: {', '.join(peers)}"
     )
-    print("[+] Commands: mine | chain | pending | address | quit")
+    print("[+] Commands: send <address> <amount> [--fee N] | mine | balance | utxos | mempool | chain | address | quit")
+    print("[+] Demo:     doublespend <address> <amount> | badsig <address> <amount>")
 
     while True:
         try:
@@ -96,11 +141,26 @@ def main():
             broadcast(block, peers)
         elif line == "chain":
             print_chain(bc)
-        elif line == "pending":
-            if not bc.pending:
-                print("[+] No pending transactions.")
-            for tx in bc.pending:
+        elif line.startswith("send "):
+            send(bc, kp, peers, line)
+        elif line == "balance":
+            total, utxos = bc.balance(address)
+            parts = ", ".join(f"{k[:4]}...{k[62:64]}:{k.split(':')[1]} = {a}" for k, a in utxos.items())
+            print(f"[+] {total} (UTXOs: {parts})")
+        elif line == "utxos":
+            if not bc.utxos:
+                print("[+] UTXO set is empty.")
+            for k, u in bc.utxos.items():
+                print(f"  {k[:8]}...:{k.split(':')[1]}  {u['amount']:>4} -> {u['address']}")
+        elif line == "mempool":
+            if not bc.mempool:
+                print("[+] Mempool is empty.")
+            for tx in bc.mempool:
                 print_tx(tx, indent="  ")
+        elif line.startswith("doublespend "):
+            bad_tx(bc, kp, peers, line, "doublespend")
+        elif line.startswith("badsig "):
+            bad_tx(bc, kp, peers, line, "badsig")
         elif line == "address":
             print(f"[+] {address}  (pubkey {kp['public_key']})")
         elif line == "quit":

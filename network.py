@@ -8,17 +8,25 @@ from flask import Flask, jsonify, request
 def broadcast(block: dict, peers: list):
     """Send the block to every peer, each in its own thread so we don't freeze."""
     for peer in peers:
-        threading.Thread(target=_send, args=(peer, block), daemon=True).start()
+        threading.Thread(target=_send, args=(peer, "/block", block, f'Block #{block["index"]}'),
+                         daemon=True).start()
 
 
-def _send(peer: str, block: dict):
+def broadcast_tx(tx: dict, peers: list):
+    """Send a new transaction to every peer."""
+    for peer in peers:
+        threading.Thread(target=_send, args=(peer, "/tx", tx, f'TX {tx["txid"][:8]}'),
+                         daemon=True).start()
+
+
+def _send(peer: str, path: str, payload: dict, label: str):
     try:
-        r = requests.post(f"{peer}/block", json=block, timeout=300)
+        r = requests.post(f"{peer}{path}", json=payload, timeout=300)
         res = r.json()
         status = (
             "accepted" if res.get("accepted") else f'rejected ({res.get("reason")})'
         )
-        print(f'[>] {peer}: Block #{block["index"]} {status}')
+        print(f"[>] {peer}: {label} {status}")
     except (requests.exceptions.RequestException, ValueError):
         print(f"[!] Warning: peer {peer} is unreachable. Continuing without it.")
 
@@ -37,7 +45,23 @@ def create_app(bc, node_id: str, address: str, peers: list) -> Flask:
         try:
             ok, reason = bc.receive_block(block)
         except Exception as e:  # malformed field types etc.
+            print(f"[x] Block rejected: bad block: {e}")
             return jsonify(accepted=False, reason=f"bad block: {e}"), 400
+        return jsonify(accepted=ok, reason=reason), (200 if ok else 409)
+
+    @app.post("/tx")
+    def receive_tx():
+        tx = request.get_json(silent=True)
+        if not isinstance(tx, dict):
+            return jsonify(accepted=False, reason="invalid JSON"), 400
+        try:
+            ok, reason = bc.add_transaction(tx)
+        except Exception as e:
+            ok, reason = False, f"bad transaction: {e}"
+        if ok:
+            print(f'\n[<] TX {tx["txid"][:8]}... accepted to mempool ({len(bc.mempool)} pending)')
+        else:
+            print(f'\n[x] TX {str(tx.get("txid"))[:8]}... rejected: {reason}')
         return jsonify(accepted=ok, reason=reason), (200 if ok else 409)
 
     @app.post("/mine")
@@ -50,6 +74,10 @@ def create_app(bc, node_id: str, address: str, peers: list) -> Flask:
     @app.get("/chain")
     def chain():
         return jsonify(bc.chain)
+
+    @app.get("/mempool")
+    def mempool():
+        return jsonify(bc.mempool)
 
     return app
 
