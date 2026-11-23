@@ -6,7 +6,7 @@ Assignment 1 base:
 
 1. **Part 1** - Legacy Bitcoin (P2PKH) vanity address generator
 2. **Part 2** - Hardcoded genesis block, deterministic block hashing and on-demand Proof-of-Work mining
-3. **Part 3** - HTTP-based P2P network of 3 local nodes with block validation and First-Valid-Block-Wins consensus
+3. **Part 3** - HTTP-based P2P network of 3 local nodes with block validation (consensus upgraded to most-work in A2)
 
 Language: **Python 3.9+**
 
@@ -101,6 +101,7 @@ Each node lists the other two nodes as peers. `keypair` is `keypair.json` (Node1
 | `utxos`      | The node's whole confirmed UTXO set                                  |
 | `mempool`    | Unconfirmed transactions waiting to be mined                         |
 | `chain`      | Print the chain with each block's transactions                       |
+| `sync`       | Ask peers for their chains, switch to one with more work (bonus)     |
 | `address`    | Print this node's address and public key                             |
 | `doublespend <address> <amount>` | Demo: re-spend a UTXO already spent in the mempool (rejected) |
 | `badsig <address> <amount>` | Demo: tx with a signature over the wrong data (rejected)      |
@@ -155,6 +156,7 @@ python vanity.py test     # prints 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
 | `prev_hash`     | str (64 hex) | Hash of the previous block                |
 | `timestamp`     | str          | UTC ISO-8601, e.g. `2026-10-24T12:00:00Z` |
 | `transactions`  | list[tx]     | Transactions in the block (A2, replaces `data`) |
+| `merkle_root`   | str (64 hex) | Merkle root of the block's txids (A2 bonus) |
 | `nonce`         | int          | Proof-of-Work counter                     |
 | `miner_address` | str          | Miner's vanity address                    |
 | `hash`          | str (64 hex) | SHA-256 of the fields above               |
@@ -164,25 +166,29 @@ python vanity.py test     # prints 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
 The `hash` field is **not** part of the hash input. Fields are joined with `|` in this order:
 
 ```
-index|timestamp|prev_hash|txids|nonce|miner_address
+index|timestamp|prev_hash|merkle_root|nonce|miner_address
 ```
 
-- `txids` is the list of the block's txids **in block order**, serialized with `json.dumps([tx["txid"] for tx in transactions], separators=(",", ":"))` → e.g. `["cafa...abcc","5f54...9214"]`, no transactions → `[]`. Each txid commits to its transaction's inputs and outputs, so the block hash covers them.
+- `merkle_root` replaces the txid list (bonus). It is computed over the block's txids **in block order**:
+  - each level pairs neighbours: `sha256(left_hex + right_hex)` on the 64-char hex strings, output as hex
+  - an odd count duplicates the last hash
+  - one tx → the root is its txid; no transactions → `"0" * 64`
+- Each txid commits to its transaction's inputs and outputs, and the root commits to every txid and their order, so the block hash covers all transactions. Receivers recompute the root from `transactions` and reject the block if it doesn't match.
 - `index` and `nonce` are written as plain decimal integers
 - The resulting string is UTF-8 encoded and hashed with **SHA-256**, output as lowercase hex
 
 Python:
 
 ```python
-txids = json.dumps([tx["txid"] for tx in block["transactions"]], separators=(",", ":"))
-s = f'{index}|{timestamp}|{prev_hash}|{txids}|{nonce}|{miner_address}'
+root = merkle_root([tx["txid"] for tx in block["transactions"]])
+s = f'{index}|{timestamp}|{prev_hash}|{root}|{nonce}|{miner_address}'
 hash = hashlib.sha256(s.encode()).hexdigest()
 ```
 
 Example input string for genesis:
 
 ```
-0|2026-01-01T00:00:00Z|0000000000000000000000000000000000000000000000000000000000000000|[]|0|GENESIS
+0|2026-01-01T00:00:00Z|0000000000000000000000000000000000000000000000000000000000000000|0000000000000000000000000000000000000000000000000000000000000000|0|GENESIS
 ```
 
 ### Genesis Block (hardcoded, identical on all nodes)
@@ -212,7 +218,7 @@ Each node runs a Flask HTTP server in a background thread. After mining, the blo
 
 ### Validation (on every received block)
 
-1. **Hash verification:** recompute the hash from the payload (excluding `hash`) and compare to `block["hash"]`.
+1. **Hash verification:** recompute the hash from the payload (excluding `hash`) and compare to `block["hash"]`; recompute the Merkle root from `transactions` and compare to `block["merkle_root"]`.
 2. **Difficulty verification:** the recomputed hash starts with `difficulty` zeros.
 3. **Chain continuity:** `block["prev_hash"] == tip["hash"]`.
 4. **Index sequence:** `block["index"] == tip["index"] + 1`.
@@ -222,17 +228,24 @@ Each node runs a Flask HTTP server in a background thread. After mining, the blo
 
 After a block is accepted (mined locally or received), the node updates its UTXO set (removes spent outputs, adds new outputs) and removes the block's transactions, and any mempool tx whose inputs are now gone, from its mempool.
 
-The block is appended only if all four checks pass. Each check is printed with ✓ in the node's terminal.
+The block is appended only if all checks pass. Each check is printed with ✓ in the node's terminal.
 
-### Consensus: First-Valid-Block-Wins
+### Consensus: Most-Work Chain Rule (A2 bonus, replaces First-Valid-Block-Wins)
 
-A node accepts the first valid block that extends its current tip and rejects any later block at the same height (it fails the continuity check).
+- **Normal case:** a node accepts the first valid block that extends its tip.
+- **Ties:** a competing block at the same height has equal work, so the node keeps its own chain.
+- **Sync trigger:** if a received block does **not** fit the tip (`prev_hash` or `index` mismatch), the node assumes a peer may be ahead. It requests full chains with `GET /chain` from every peer (`sync_with_peers` in `network.py`). The `sync` command does the same by hand.
+- **Chain check (`try_replace_chain` in `blockchain.py`):**
+  1. The genesis block must match ours.
+  2. Total work = number of blocks × `16^difficulty`. Each leading hex zero has a 1/16 chance, so that's the expected number of hashes per block. The peer's chain must have **more** total work than ours. Difficulty is fixed, so the most-work chain is the longest valid chain.
+  3. The chain is rebuilt from genesis in a fresh `Blockchain`: every block runs all validation checks and `apply_block`. This rebuilds the UTXO set from scratch, and one invalid block rejects the whole chain.
+- **Reorganization:** if the peer's chain passes, the node replaces its chain and UTXO set. Transactions from its own dropped blocks, plus its old mempool, are re-checked against the new UTXO set, and the valid ones go back into the mempool. The coinbases of dropped blocks disappear.
 
 **Concurrency:** a single lock protects the chain. Mining holds the lock until its block is found and appended, so a block that arrives mid-mining is validated afterwards against the new tip and rejected. Neither miner yields its own block.
 
-### Known Limitation - Forks
+### Forks
 
-If two nodes mine at the same height simultaneously, each keeps its own block and rejects the other's, so the network splits permanently. This is expected for Assignment 1; most-work chain selection is planned for Assignment 2.
+If two nodes mine at the same height at the same time, each keeps its own block for now, so the network temporarily splits. As soon as either side mines the next block, the other side's nodes receive a block that doesn't fit their tip. They fetch the longer chain and reorganize onto it, so the network converges again.
 
 ---
 
@@ -387,7 +400,8 @@ curl -s -X POST http://127.0.0.1:8002/mine > /dev/null & curl -s -X POST http://
 
 - Node 2 and Node 3 each hold their own Block #1 (different hashes) and rejected the other's with a `prev_hash` mismatch.
 - Node 1 holds whichever block arrived first.
-- Mining again on Node 2 is rejected by Node 3, so the split persists.
+- Run `mine` again on Node 2. Node 3 logs `Block does not extend our tip, requesting full chains from peers...` then `REORG: switched from height 1 to 2 (more work). UTXO set rebuilt...`.
+- Run `chain` / `utxos` on all three nodes: they are identical again. Node 3's orphaned coinbase is gone.
 
 **Offline peer test:** stop one node and run `mine` on another; a warning is logged and the node continues normally.
 

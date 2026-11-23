@@ -4,7 +4,7 @@ import os
 
 from vanity import load_or_create, load_or_create_plain, matches
 from blockchain import Blockchain
-from network import create_app, start_server, broadcast, broadcast_tx
+from network import create_app, start_server, broadcast, broadcast_tx, sync_with_peers
 from transaction import create_transaction, sign_txid
 
 
@@ -29,7 +29,7 @@ def print_chain(bc):
     for b in bc.chain:
         print(
             f'  #{b["index"]}  hash={b["hash"][:16]}...  prev={b["prev_hash"][:16]}...  '
-            f'nonce={b["nonce"]}  miner={b["miner_address"]}  txs={len(b["transactions"])}'
+            f'nonce={b["nonce"]}  merkle={b["merkle_root"][:12]}...  miner={b["miner_address"]}  txs={len(b["transactions"])}'
         )
         for tx in b["transactions"]:
             print_tx(tx)
@@ -127,7 +127,7 @@ def main():
     print(
         f"[+] {node_id} listening on http://127.0.0.1:{port}  |  Peers: {', '.join(peers)}"
     )
-    print("[+] Commands: send <address> <amount> [--fee N] | mine | balance | utxos | mempool | chain | address | quit")
+    print("[+] Commands: send <address> <amount> [--fee N] | mine | balance | utxos | mempool | chain | sync | address | quit")
     print("[+] Demo:     doublespend <address> <amount> | badsig <address> <amount>")
 
     while True:
@@ -161,6 +161,9 @@ def main():
             bad_tx(bc, kp, peers, line, "doublespend")
         elif line.startswith("badsig "):
             bad_tx(bc, kp, peers, line, "badsig")
+        elif line == "sync":
+            sync_with_peers(bc, peers)
+            print(f"[+] Height {len(bc.chain) - 1}, total work {bc.total_work(bc.chain)}")
         elif line == "address":
             print(f"[+] {address}  (pubkey {kp['public_key']})")
         elif line == "quit":

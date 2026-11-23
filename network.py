@@ -31,6 +31,18 @@ def _send(peer: str, path: str, payload: dict, label: str):
         print(f"[!] Warning: peer {peer} is unreachable. Continuing without it.")
 
 
+def sync_with_peers(bc, peers: list):
+    """Most-work rule: ask every peer for its full chain and switch if one has more work."""
+    for peer in peers:
+        try:
+            chain = requests.get(f"{peer}/chain", timeout=30).json()
+        except (requests.exceptions.RequestException, ValueError):
+            continue
+        switched, reason = bc.try_replace_chain(chain)
+        if not switched and reason != "not more work than our chain":
+            print(f"[x] Chain from {peer} rejected: {reason}")
+
+
 def create_app(bc, node_id: str, address: str, peers: list) -> Flask:
     app = Flask(node_id)
 
@@ -47,6 +59,10 @@ def create_app(bc, node_id: str, address: str, peers: list) -> Flask:
         except Exception as e:  # malformed field types etc.
             print(f"[x] Block rejected: bad block: {e}")
             return jsonify(accepted=False, reason=f"bad block: {e}"), 400
+        if not ok and ("prev_hash" in reason or "index" in reason):
+            # block doesn't fit our tip -> maybe a peer has a longer chain
+            print("[?] Block does not extend our tip, requesting full chains from peers...")
+            threading.Thread(target=sync_with_peers, args=(bc, peers), daemon=True).start()
         return jsonify(accepted=ok, reason=reason), (200 if ok else 409)
 
     @app.post("/tx")

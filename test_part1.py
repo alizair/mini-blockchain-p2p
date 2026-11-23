@@ -9,7 +9,7 @@ transaction built locally just for the test (real coinbases come in Part 2).
 import copy
 import json
 
-from blockchain import compute_hash, hash_input, make_genesis
+from blockchain import block_merkle_root, compute_hash, hash_input, make_genesis, merkle_root
 from transaction import (
     compute_fee, compute_txid, create_transaction, make_coinbase, outpoint_key,
     txid_preimage, unlocks, validate_structure,
@@ -103,10 +103,14 @@ check(len(exact["outputs"]) == 1, "no change output when nothing is left over")
 g = make_genesis()
 block = {"index": 1, "prev_hash": g["hash"], "timestamp": "2026-11-22T00:00:00Z",
          "transactions": [fund, tx], "nonce": 0, "miner_address": n1["address"]}
+block["merkle_root"] = block_merkle_root(block)
 print("    block hash input:", hash_input(block))
 h = compute_hash(block)
 block2 = dict(block, transactions=[tx, fund])
-check(compute_hash(block2) != h, "block hash depends on tx order")
-check(hash_input(make_genesis()).split("|")[3] == "[]", "genesis has no transactions")
+block2["merkle_root"] = block_merkle_root(block2)
+check(compute_hash(block2) != h, "block hash depends on tx order (via Merkle root)")
+check(make_genesis()["transactions"] == [] and hash_input(make_genesis()).split("|")[3] == "0" * 64,
+      "genesis has no transactions (Merkle root = 64 zeros)")
+check(merkle_root(["a" * 64]) == "a" * 64, "Merkle root of one tx is its txid")
 
 print(f"\nAll {PASS} Part 1 checks passed.")

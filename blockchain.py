@@ -17,12 +17,31 @@ GENESIS = {
 }
 
 
+def merkle_root(txids):
+    """Pair up hashes level by level: sha256(left + right) on the hex strings.
+    Odd count -> duplicate the last one. No transactions -> 64 zeros."""
+    if not txids:
+        return "0" * 64
+    level = list(txids)
+    while len(level) > 1:
+        if len(level) % 2 == 1:
+            level.append(level[-1])
+        level = [
+            hashlib.sha256((level[i] + level[i + 1]).encode()).hexdigest()
+            for i in range(0, len(level), 2)
+        ]
+    return level[0]
+
+
+def block_merkle_root(block):
+    return merkle_root([tx["txid"] for tx in block["transactions"]])
+
+
 def hash_input(block: dict) -> str:
-    """Order: index|timestamp|prev_hash|txids|nonce|miner_address  ('hash' NOT included)."""
-    txids = json.dumps([tx["txid"] for tx in block["transactions"]], separators=(",", ":"))
+    """Order: index|timestamp|prev_hash|merkle_root|nonce|miner_address  ('hash' NOT included)."""
     return (
         f'{block["index"]}|{block["timestamp"]}|{block["prev_hash"]}|'
-        f'{txids}|{block["nonce"]}|{block["miner_address"]}'
+        f'{block["merkle_root"]}|{block["nonce"]}|{block["miner_address"]}'
     )
 
 
@@ -32,6 +51,7 @@ def compute_hash(block: dict) -> str:
 
 def make_genesis() -> dict:
     g = dict(GENESIS)
+    g["merkle_root"] = block_merkle_root(g)
     g["hash"] = compute_hash(g)
     return g
 
@@ -147,6 +167,7 @@ class Blockchain:
                 "nonce": 0,
                 "miner_address": miner_address,
             }
+            block["merkle_root"] = block_merkle_root(block)
             target = "0" * self.difficulty
             print(
                 f'[+] Block #{block["index"]} Target Difficulty: {self.difficulty} leading zeros ("{target}...")'
@@ -170,6 +191,48 @@ class Blockchain:
         print(f"[+] Coinbase: {BLOCK_SUBSIDY + fees} (50 + {fees} fees) -> {miner_address}  |  {len(txs)} txs")
         return block
 
+    # ---------- Most-work chain rule ----------
+    def total_work(self, chain):
+        # expected hashes per block = 16^difficulty (each leading hex zero is 1/16)
+        return (len(chain) - 1) * 16 ** self.difficulty
+
+    def try_replace_chain(self, new_chain):
+        """Rebuild the peer's chain from genesis with full validation. If it is valid
+        and has more total work than ours, switch to it. Returns (switched, reason)."""
+        if not isinstance(new_chain, list) or not new_chain:
+            return False, "empty chain"
+        if new_chain[0].get("hash") != make_genesis()["hash"]:
+            return False, "different genesis block"
+        if self.total_work(new_chain) <= self.total_work(self.chain):
+            return False, "not more work than our chain"
+
+        temp = Blockchain(self.difficulty)
+        for block in new_chain[1:]:
+            ok, reason = temp._validate(block, verbose=False)
+            if not ok:
+                return False, f'block #{block.get("index")} invalid: {reason}'
+            temp.chain.append(block)
+            temp.apply_block(block)
+
+        with self.lock:
+            if self.total_work(new_chain) <= self.total_work(self.chain):
+                return False, "not more work than our chain"
+            # txs from our blocks that are not in the new chain go back to the mempool
+            new_txids = {tx["txid"] for b in temp.chain for tx in b["transactions"]}
+            old_txs = [tx for b in self.chain[1:] for tx in b["transactions"]
+                       if not is_coinbase(tx) and tx["txid"] not in new_txids]
+            pending = old_txs + self.mempool
+
+            old_height = len(self.chain) - 1
+            self.chain, self.utxos, self.mempool = temp.chain, temp.utxos, []
+            for tx in pending:
+                ok, reason, fee = self.check_transaction(tx, self.mempool_spent())
+                if ok:
+                    self.mempool.append(tx)
+        print(f"[+] REORG: switched from height {old_height} to {len(self.chain) - 1} "
+              f"(more work). UTXO set rebuilt, {len(self.mempool)} txs back in mempool.")
+        return True, "switched"
+
     # ---------- Receiving ----------
     def receive_block(self, block: dict):
         with self.lock:
@@ -184,12 +247,17 @@ class Blockchain:
                 print(f"[x] Block rejected: {reason}")
             return ok, reason
 
-    def _validate(self, block: dict):
+    def _validate(self, block: dict, verbose=True):
+        def log(msg):
+            if verbose:
+                print(msg)
+
         required = (
             "index",
             "prev_hash",
             "timestamp",
             "transactions",
+            "merkle_root",
             "nonce",
             "miner_address",
             "hash",
@@ -202,23 +270,25 @@ class Blockchain:
         recomputed = compute_hash(block)
         if recomputed != block["hash"]:
             return False, "hash verification failed"
-        print("    [✓] 1. Hash verification")
+        if block_merkle_root(block) != block["merkle_root"]:
+            return False, "merkle root does not match transactions"
+        log("    [✓] 1. Hash verification (incl. Merkle root)")
 
         # 2. Difficulty verification
         target = "0" * self.difficulty
         if not recomputed.startswith(target):
             return False, f"difficulty not met (needs {target}...)"
-        print(f"    [✓] 2. Difficulty ({target}...)")
+        log(f"    [✓] 2. Difficulty ({target}...)")
 
         # 3. Chain continuity
         if block["prev_hash"] != tip["hash"]:
             return False, f'prev_hash does not match our tip (block #{tip["index"]})'
-        print("    [✓] 3. Chain continuity")
+        log("    [✓] 3. Chain continuity")
 
         # 4. Index sequence
         if block["index"] != tip["index"] + 1:
             return False, f'index {block["index"]} != tip+1 ({tip["index"] + 1})'
-        print("    [✓] 4. Index sequence")
+        log("    [✓] 4. Index sequence")
 
         txs = block["transactions"]
 
@@ -229,7 +299,7 @@ class Blockchain:
             return False, "coinbase height does not match block index"
         if any(is_coinbase(tx) for tx in txs[1:]):
             return False, "more than one coinbase"
-        print("    [✓] 5. Coinbase is first and unique")
+        log("    [✓] 5. Coinbase is first and unique")
 
         # 6. Every other tx passes Checks 1-4, no outpoint spent twice in the block
         spent, fees = set(), 0
@@ -240,12 +310,12 @@ class Blockchain:
             fees += fee
             for inp in tx["inputs"]:
                 spent.add(outpoint_key(inp["prev_txid"], inp["output_index"]))
-        print(f"    [✓] 6. All {len(txs) - 1} transactions pass Checks 1-4")
+        log(f"    [✓] 6. All {len(txs) - 1} transactions pass Checks 1-4")
 
         # 7. Coinbase reward <= 50 + fees
         reward = sum(o["amount"] for o in txs[0]["outputs"])
         if reward > BLOCK_SUBSIDY + fees:
             return False, f"coinbase {reward} > {BLOCK_SUBSIDY} + {fees} fees"
-        print(f"    [✓] 7. Coinbase reward {reward} <= {BLOCK_SUBSIDY} + {fees}")
+        log(f"    [✓] 7. Coinbase reward {reward} <= {BLOCK_SUBSIDY} + {fees}")
 
         return True, "ok"
